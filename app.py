@@ -83,8 +83,8 @@ DASHBOARD_CATEGORIES = {
 # 인증 설정 로딩
 # ─────────────────────────────────────────────────────────────────────────────
 def get_auth_config():
-    """Streamlit Cloud(st.secrets) 또는 로컬(config.yaml)에서 인증 설정 로드"""
-    # Streamlit Cloud 환경: secrets에 credentials 키가 있으면 사용
+    """Streamlit Cloud / Railway / 로컬 순으로 인증 설정 로드"""
+    # 1) Streamlit Community Cloud: st.secrets
     try:
         if "credentials" in st.secrets and "cookie" in st.secrets:
             credentials = {"usernames": {}}
@@ -105,7 +105,17 @@ def get_auth_config():
     except Exception:
         pass
 
-    # 로컬 환경: config.yaml 파일 사용
+    # 2) Railway 등 서버 환경: CONFIG_YAML_B64 환경변수 (base64 인코딩된 yaml)
+    import base64
+    config_b64 = os.environ.get("CONFIG_YAML_B64")
+    if config_b64:
+        try:
+            config_str = base64.b64decode(config_b64).decode("utf-8")
+            return yaml.safe_load(config_str)
+        except Exception:
+            pass
+
+    # 3) 로컬 개발: config.yaml 파일
     if os.path.exists("config.yaml"):
         with open("config.yaml", encoding="utf-8-sig") as f:
             return yaml.load(f, Loader=SafeLoader)
