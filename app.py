@@ -2,6 +2,8 @@
 건설안전기술사 기출문제 분석 프로그램
 """
 import os
+import json
+import urllib.request
 import yaml
 from yaml.loader import SafeLoader
 import streamlit as st
@@ -82,9 +84,40 @@ DASHBOARD_CATEGORIES = {
 # ─────────────────────────────────────────────────────────────────────────────
 # 인증 설정 로딩
 # ─────────────────────────────────────────────────────────────────────────────
+@st.cache_data(ttl=300)  # 5분 캐시 — Gist 변경 후 최대 5분 내 반영
 def get_auth_config():
-    """Streamlit Cloud / Railway / 로컬 순으로 인증 설정 로드"""
-    # 1) Streamlit Community Cloud: st.secrets
+    """GitHub Gist → Streamlit Secrets → 로컬 config.yaml 순으로 인증 설정 로드"""
+
+    # 1) GitHub Gist 자동 동기화 (gist_id + github_token이 secrets에 있을 때)
+    try:
+        gist_id = None
+        github_token = None
+        try:
+            gist_id = st.secrets.get("gist_id")
+            github_token = st.secrets.get("github_token")
+        except Exception:
+            pass
+        if not gist_id:
+            gist_id = os.environ.get("GIST_ID")
+            github_token = os.environ.get("GITHUB_TOKEN")
+
+        if gist_id and github_token:
+            req = urllib.request.Request(
+                f"https://api.github.com/gists/{gist_id}",
+                headers={
+                    "Authorization": f"token {github_token}",
+                    "Accept": "application/vnd.github.v3+json",
+                    "User-Agent": "construction-safety-exam",
+                },
+            )
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                data = json.loads(resp.read())
+                content = data["files"]["config.yaml"]["content"]
+                return yaml.safe_load(content)
+    except Exception:
+        pass
+
+    # 2) Streamlit Cloud 직접 secrets (credentials 항목이 있는 경우)
     try:
         if "credentials" in st.secrets and "cookie" in st.secrets:
             credentials = {"usernames": {}}
@@ -104,16 +137,6 @@ def get_auth_config():
             }
     except Exception:
         pass
-
-    # 2) Railway 등 서버 환경: CONFIG_YAML_B64 환경변수 (base64 인코딩된 yaml)
-    import base64
-    config_b64 = os.environ.get("CONFIG_YAML_B64")
-    if config_b64:
-        try:
-            config_str = base64.b64decode(config_b64).decode("utf-8")
-            return yaml.safe_load(config_str)
-        except Exception:
-            pass
 
     # 3) 로컬 개발: config.yaml 파일
     if os.path.exists("config.yaml"):

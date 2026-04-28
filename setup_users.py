@@ -1,25 +1,29 @@
 """
-사용자 관리 스크립트
+사용자 관리 스크립트 — 변경 시 GitHub Gist 자동 동기화
 실행: python setup_users.py
 """
 import yaml
 import os
 import secrets
+import json
+import urllib.request
+import urllib.error
 from streamlit_authenticator.utilities.hasher import Hasher
 
 CONFIG_FILE = "config.yaml"
+TOKEN_FILE = ".github_token"
+GIST_FILE = ".gist_id"
 
 
 def load_config():
     if os.path.exists(CONFIG_FILE):
         with open(CONFIG_FILE, encoding="utf-8-sig") as f:
             return yaml.safe_load(f)
-    # 최초 실행: 기본 구조 생성
     return {
         "credentials": {"usernames": {}},
         "cookie": {
             "name": "construction_safety_exam",
-            "key": secrets.token_hex(32),  # 랜덤 보안 키 자동 생성
+            "key": secrets.token_hex(32),
             "expiry_days": 30,
         },
     }
@@ -28,7 +32,40 @@ def load_config():
 def save_config(config):
     with open(CONFIG_FILE, "w", encoding="utf-8") as f:
         yaml.dump(config, f, allow_unicode=True, default_flow_style=False)
-    print(f"  → {CONFIG_FILE} 저장 완료")
+    print("  → config.yaml 저장 완료")
+    sync_to_gist(config)
+
+
+def sync_to_gist(config):
+    """변경된 config를 GitHub Gist에 자동 동기화"""
+    if not os.path.exists(TOKEN_FILE) or not os.path.exists(GIST_FILE):
+        return
+
+    with open(TOKEN_FILE) as f:
+        token = f.read().strip()
+    with open(GIST_FILE) as f:
+        gist_id = f.read().strip()
+
+    content = yaml.dump(config, allow_unicode=True, default_flow_style=False)
+    data = json.dumps({
+        "files": {"config.yaml": {"content": content}}
+    }).encode()
+
+    req = urllib.request.Request(
+        f"https://api.github.com/gists/{gist_id}",
+        data=data,
+        method="PATCH",
+        headers={
+            "Authorization": f"token {token}",
+            "Content-Type": "application/json",
+            "User-Agent": "construction-safety-exam",
+        },
+    )
+    try:
+        urllib.request.urlopen(req)
+        print("  → GitHub Gist 동기화 완료 (클라우드에 즉시 반영)")
+    except urllib.error.HTTPError as e:
+        print(f"  [경고] Gist 동기화 실패: {e.code}. Gist초기설정.bat을 다시 실행하세요.")
 
 
 def hash_password(plain):
@@ -42,7 +79,7 @@ def add_user(config):
         print("  아이디를 입력하세요.")
         return
     if username in config["credentials"]["usernames"]:
-        print(f"  이미 존재하는 아이디입니다: {username}")
+        print(f"  이미 존재하는 아이디: {username}")
         return
     name = input("  이름(표시명): ").strip()
     email = input("  이메일 (선택): ").strip()
@@ -50,7 +87,6 @@ def add_user(config):
     if not password:
         print("  비밀번호를 입력하세요.")
         return
-
     config["credentials"]["usernames"][username] = {
         "name": name,
         "email": email,
@@ -104,6 +140,11 @@ def change_password(config):
 def main():
     print("=" * 50)
     print("  건설안전기술사 기출문제 프로그램 — 사용자 관리")
+    gist_ready = os.path.exists(TOKEN_FILE) and os.path.exists(GIST_FILE)
+    if gist_ready:
+        print("  [자동 동기화 활성화 — 변경 즉시 클라우드 반영]")
+    else:
+        print("  [Gist 미설정 — Gist초기설정.bat 실행 시 자동화 가능]")
     print("=" * 50)
 
     config = load_config()
