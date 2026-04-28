@@ -234,7 +234,7 @@ def main():
     st.set_page_config(
         page_title="건설안전기술사 기출문제 분석",
         page_icon="🏗️",
-        layout="wide",
+        layout="centered",
     )
 
     # ── 인증 ──────────────────────────────────────────────────────────────────
@@ -268,9 +268,33 @@ def main():
         st.stop()
 
     # ── 로그인 성공 ────────────────────────────────────────────────────────────
+    st.markdown("""
+<style>
+@media screen and (max-width: 768px) {
+    [data-testid="column"] {
+        width: 100% !important;
+        flex: none !important;
+        min-width: 100% !important;
+    }
+    .stTabs [data-baseweb="tab"] {
+        font-size: 13px;
+        padding: 8px 6px;
+    }
+    .stButton > button {
+        min-height: 44px;
+    }
+    .stSelectbox > div, .stTextInput > div > div > input {
+        font-size: 16px;
+    }
+}
+</style>
+""", unsafe_allow_html=True)
+
     with st.sidebar:
         st.markdown(f"**{st.session_state.get('name', '')}** 님 환영합니다")
         authenticator.logout("로그아웃", location="sidebar")
+        st.markdown("---")
+        st.caption("📱 홈 화면 추가: 브라우저 메뉴 → '홈 화면에 추가'")
 
     st.title("🏗️ 건설안전기술사 기출문제 분석 프로그램")
     st.caption(f"90회 ~ 138회 기출문제 | 유사도 기준: {SIMILARITY_THRESHOLD * 100:.0f}%")
