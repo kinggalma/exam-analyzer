@@ -296,11 +296,13 @@ def main():
         st.markdown("---")
         st.caption("📱 홈 화면 추가: 브라우저 메뉴 → '홈 화면에 추가'")
 
-    st.title("🏗️ 건설안전기술사 기출문제 분석 프로그램")
-    st.caption(f"90회 ~ 138회 기출문제 | 유사도 기준: {SIMILARITY_THRESHOLD * 100:.0f}%")
-
     df = load_data()
     _, matrix = build_tfidf(df)
+    min_round = int(df["회차"].min())
+    max_round = int(df["회차"].max())
+
+    st.title("🏗️ 건설안전기술사 기출문제 분석 프로그램")
+    st.caption(f"{min_round}회 ~ {max_round}회 기출문제 | 유사도 기준: {SIMILARITY_THRESHOLD * 100:.0f}%")
 
     tab1, tab2, tab3 = st.tabs(["🔍 문제 검색 & 유사 문제", "📋 회차별 문제 목록", "📊 대쉬보드"])
 
@@ -414,7 +416,7 @@ def main():
         dash_df, rounds = build_dashboard_data(df)
         round_strs = [str(r) for r in rounds]
 
-        st.markdown("### 분야별 누적 출제 문항 수 (90~138회)")
+        st.markdown(f"### 분야별 누적 출제 문항 수 ({min_round}~{max_round}회)")
         total_sorted = dash_df.sort_values("합계", ascending=True)
         fig_total = px.bar(
             total_sorted, x="합계", y="분야", orientation="h",
