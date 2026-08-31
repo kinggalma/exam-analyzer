@@ -15,7 +15,7 @@ from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 import plotly.express as px
 
-from pdf_import import CAT1_OPTIONS, auto_assign_cat1, parse_exam_pdf
+from pdf_import import CAT1_OPTIONS, auto_assign_cat1, parse_exam_pdf, parse_exam_text
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 설정
@@ -615,66 +615,101 @@ def main():
             )
 
     # ──────────────────────────────────────────────────────────────────────────
-    # TAB 4: 새 회차 추가 (관리자 전용) — 문제지 PDF만 올리면 즉시 반영
+    # TAB 4: 새 회차 추가 (관리자 전용) — PDF 업로드 또는 텍스트 붙여넣기로 즉시 반영
     # ──────────────────────────────────────────────────────────────────────────
     if is_admin:
         with tab4:
-            st.subheader("새 회차 문제지 PDF 추가")
+            st.subheader("새 회차 문제 추가")
             st.caption(
-                "국가기술자격 시험문제 표준 양식(1페이지=1교시) PDF를 올리면 "
-                "회차·교시·번호·문제가 자동 인식됩니다. 저장하면 비공개 Gist에 저장되어 "
-                "재배포 없이 모든 사용자에게 즉시 반영됩니다."
+                "저장하면 비공개 Gist에 저장되어 재배포 없이 모든 사용자에게 즉시 반영됩니다."
             )
 
             pending_df = load_pending_questions()
             if not pending_df.empty:
                 st.caption(f"현재 Gist에 저장된 신규 문제: {len(pending_df)}개 (회차: {sorted(pending_df['회차'].unique().tolist())})")
 
-            uploaded_pdf = st.file_uploader("문제지 PDF 업로드", type=["pdf"], key="admin_pdf_uploader")
+            input_mode = st.radio(
+                "입력 방식",
+                ["📄 문제지 PDF (텍스트 기반)", "✏️ 텍스트 붙여넣기 (이미지 PDF 등)"],
+                horizontal=True,
+                key="admin_input_mode",
+            )
 
-            if uploaded_pdf:
-                try:
-                    preview_df = parse_exam_pdf(uploaded_pdf)
-                    st.success(f"✅ {preview_df['회차'].iloc[0]}회 — {len(preview_df)}개 문제 인식됨")
+            preview_df = None
+            editor_key = None
 
-                    edited_df = st.data_editor(
-                        preview_df,
-                        column_config={
-                            "회차": st.column_config.NumberColumn("회차", width="small", disabled=True),
-                            "교시": st.column_config.NumberColumn("교시", width="small", disabled=True),
-                            "번호": st.column_config.NumberColumn("번호", width="small", disabled=True),
-                            "cat1": st.column_config.SelectboxColumn("분야(cat1)", options=CAT1_OPTIONS, width="medium"),
-                            "cat2": st.column_config.TextColumn("소분류(cat2)", width="medium"),
-                            "문제": st.column_config.TextColumn("문제 내용", width="large"),
-                        },
-                        hide_index=True,
-                        use_container_width=True,
-                        num_rows="fixed",
-                        key="admin_pdf_editor",
-                    )
+            if input_mode.startswith("📄"):
+                st.caption(
+                    "국가기술자격 시험문제 표준 양식(1페이지=1교시, 복사 가능한 텍스트) PDF만 지원됩니다. "
+                    "이미지로 스캔된 PDF는 텍스트를 못 읽으므로 오른쪽 '텍스트 붙여넣기'를 사용하세요."
+                )
+                uploaded_pdf = st.file_uploader("문제지 PDF 업로드", type=["pdf"], key="admin_pdf_uploader")
+                if uploaded_pdf:
+                    try:
+                        preview_df = parse_exam_pdf(uploaded_pdf)
+                        st.success(f"✅ {preview_df['회차'].iloc[0]}회 — {len(preview_df)}개 문제 인식됨")
+                        editor_key = "admin_pdf_editor"
+                    except Exception as e:
+                        st.error(f"PDF 파싱 실패: {e}")
+            else:
+                st.caption(
+                    "휴대폰 OCR 앱(네이버 렌즈, Google Lens 등)이나 다른 경로로 얻은 문제 텍스트를 그대로 붙여넣으세요. "
+                    "'N교시' 줄로 교시를 구분하고, 각 문제를 '번호. 내용' 형식으로 적으면 자동 인식됩니다."
+                )
+                paste_round = st.number_input(
+                    "회차", min_value=90, max_value=300, value=max_round + 1, step=1, key="admin_paste_round",
+                )
+                pasted_text = st.text_area(
+                    "문제 텍스트 붙여넣기",
+                    height=280,
+                    placeholder="1교시\n1. 안전심리의 5대 요소\n2. 산업안전보건법상 보건조치\n...\n\n2교시\n1. ...",
+                    key="admin_pasted_text",
+                )
+                if pasted_text.strip():
+                    try:
+                        preview_df = parse_exam_text(pasted_text, int(paste_round))
+                        st.success(f"✅ {len(preview_df)}개 문제 인식됨")
+                        editor_key = "admin_text_editor"
+                    except Exception as e:
+                        st.error(f"텍스트 파싱 실패: {e}")
 
-                    existing_keys = set(zip(df["회차"], df["교시"], df["번호"]))
-                    dup_mask = edited_df.apply(
-                        lambda r: (int(r["회차"]), int(r["교시"]), int(r["번호"])) in existing_keys,
-                        axis=1,
-                    )
-                    to_add = edited_df[~dup_mask]
-                    if dup_mask.any():
-                        st.warning(f"⚠️ 이미 존재하는 문제 {dup_mask.sum()}개는 제외됩니다.")
+            if preview_df is not None:
+                edited_df = st.data_editor(
+                    preview_df,
+                    column_config={
+                        "회차": st.column_config.NumberColumn("회차", width="small", disabled=True),
+                        "교시": st.column_config.NumberColumn("교시", width="small", disabled=True),
+                        "번호": st.column_config.NumberColumn("번호", width="small", disabled=True),
+                        "cat1": st.column_config.SelectboxColumn("분야(cat1)", options=CAT1_OPTIONS, width="medium"),
+                        "cat2": st.column_config.TextColumn("소분류(cat2)", width="medium"),
+                        "문제": st.column_config.TextColumn("문제 내용", width="large"),
+                    },
+                    hide_index=True,
+                    use_container_width=True,
+                    num_rows="fixed",
+                    key=editor_key,
+                )
 
-                    st.markdown(f"**최종 추가될 문제: {len(to_add)}개**")
+                existing_keys = set(zip(df["회차"], df["교시"], df["번호"]))
+                dup_mask = edited_df.apply(
+                    lambda r: (int(r["회차"]), int(r["교시"]), int(r["번호"])) in existing_keys,
+                    axis=1,
+                )
+                to_add = edited_df[~dup_mask]
+                if dup_mask.any():
+                    st.warning(f"⚠️ 이미 존재하는 문제 {dup_mask.sum()}개는 제외됩니다.")
 
-                    if st.button("💾 저장 (즉시 반영)", type="primary", disabled=len(to_add) == 0):
-                        try:
-                            save_pending_questions(to_add)
-                            load_data.clear()
-                            build_tfidf.clear()
-                            st.success(f"🎉 {len(to_add)}개 문제가 저장되어 즉시 반영되었습니다!")
-                            st.rerun()
-                        except Exception as e:
-                            st.error(f"저장 실패: {e}")
-                except Exception as e:
-                    st.error(f"PDF 파싱 실패: {e}")
+                st.markdown(f"**최종 추가될 문제: {len(to_add)}개**")
+
+                if st.button("💾 저장 (즉시 반영)", type="primary", disabled=len(to_add) == 0):
+                    try:
+                        save_pending_questions(to_add)
+                        load_data.clear()
+                        build_tfidf.clear()
+                        st.success(f"🎉 {len(to_add)}개 문제가 저장되어 즉시 반영되었습니다!")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"저장 실패: {e}")
 
 
 if __name__ == "__main__":

@@ -140,6 +140,7 @@ ROUND_PAT = re.compile(r"제\s*(\d+)\s*회")
 SELECT_LINE_PAT = re.compile(r"총\s*\d+\s*문제")
 FOOTER_PAGENUM_PAT = re.compile(r"^\d+\s*-\s*\d+$")
 QUESTION_START_PAT = re.compile(r"^(\d{1,2})[.\s](.*)$")
+PERIOD_HEADER_PAT = re.compile(r"^(\d)\s*교시\s*$")
 
 
 def parse_exam_pdf(source) -> pd.DataFrame:
@@ -197,6 +198,75 @@ def parse_exam_pdf(source) -> pd.DataFrame:
     if not rows:
         raise ValueError(
             "문제를 추출하지 못했습니다. 텍스트 기반 PDF(복사 가능한 문제지)인지 확인하세요."
+        )
+
+    return pd.DataFrame(rows)
+
+
+def parse_exam_text(text: str, round_num: int) -> pd.DataFrame:
+    """붙여넣은 문제 텍스트 → 표준 컬럼 DataFrame.
+
+    이미지 스캔 PDF처럼 텍스트 추출이 불가능한 자료용 대체 경로.
+    OCR 앱 등으로 얻은 텍스트를 그대로 붙여넣으면 됨. 형식:
+        1교시
+        1. 문제 내용
+        2. 문제 내용
+           (줄바꿈된 문제는 이어서 적어도 됨)
+
+        2교시
+        1. 문제 내용
+        ...
+    "N교시" 줄로 교시 구분, "번호. 내용" 형식으로 문제 인식.
+    """
+    rows = []
+    period = None
+    expected_num = 1
+    cur_num = None
+    cur_parts: list[str] = []
+
+    def flush():
+        if cur_num is not None and period is not None:
+            content = " ".join(cur_parts).strip()
+            rows.append({
+                "회차": round_num,
+                "교시": period,
+                "번호": cur_num,
+                "cat1": auto_assign_cat1(content),
+                "cat2": "",
+                "문제": f"{cur_num}. {content}",
+            })
+
+    for raw_line in text.splitlines():
+        ln = raw_line.strip()
+        if not ln:
+            continue
+
+        pm = PERIOD_HEADER_PAT.match(ln)
+        if pm:
+            flush()
+            period = int(pm.group(1))
+            expected_num = 1
+            cur_num = None
+            cur_parts = []
+            continue
+
+        if period is None:
+            continue  # 첫 "N교시" 줄이 나오기 전 내용은 무시
+
+        m = QUESTION_START_PAT.match(ln)
+        if m and int(m.group(1)) == expected_num:
+            flush()
+            cur_num = expected_num
+            cur_parts = [m.group(2).strip()]
+            expected_num += 1
+        elif cur_num is not None:
+            cur_parts.append(ln)
+    flush()
+
+    if not rows:
+        raise ValueError(
+            "문제를 인식하지 못했습니다. 'N교시' 줄로 구분하고 "
+            "각 문제는 '번호. 내용' 형식인지 확인하세요."
         )
 
     return pd.DataFrame(rows)
