@@ -140,7 +140,7 @@ ROUND_PAT = re.compile(r"제\s*(\d+)\s*회")
 SELECT_LINE_PAT = re.compile(r"총\s*\d+\s*문제")
 FOOTER_PAGENUM_PAT = re.compile(r"^\d+\s*-\s*\d+$")
 QUESTION_START_PAT = re.compile(r"^(\d{1,2})[.\s](.*)$")
-PERIOD_HEADER_PAT = re.compile(r"^(\d)\s*교시\s*$")
+PERIOD_HEADER_PAT = re.compile(r"^[\[(]?\s*(\d)\s*교시\s*[\])]?\s*$")
 
 
 def parse_exam_pdf(source) -> pd.DataFrame:
@@ -237,7 +237,7 @@ def parse_exam_text(text: str, round_num: int) -> pd.DataFrame:
             })
 
     for raw_line in text.splitlines():
-        ln = raw_line.strip()
+        ln = raw_line.replace("﻿", "").strip()
         if not ln:
             continue
 
