@@ -253,6 +253,69 @@ def save_pending_questions(new_df: pd.DataFrame) -> pd.DataFrame:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Gist 기반 분류(분야/세부주제) 수정 — 기존 엑셀 데이터의 잘못된 cat1도 덮어쓸 수 있음
+# ─────────────────────────────────────────────────────────────────────────────
+CORRECTIONS_FILENAME = "corrections.json"
+CORRECTION_COLUMNS = ["회차", "교시", "번호", "cat1", "cat2"]
+
+
+def load_corrections() -> pd.DataFrame:
+    """관리자가 회차별 문제 목록에서 직접 고친 분야/세부주제 목록."""
+    try:
+        gist = _fetch_gist()
+        file_info = (gist or {}).get("files", {}).get(CORRECTIONS_FILENAME)
+        if not file_info or not file_info.get("content"):
+            return pd.DataFrame(columns=CORRECTION_COLUMNS)
+        records = json.loads(file_info["content"])
+        if not records:
+            return pd.DataFrame(columns=CORRECTION_COLUMNS)
+        cdf = pd.DataFrame(records)
+        cdf["회차"] = cdf["회차"].astype(int)
+        cdf["교시"] = cdf["교시"].astype(int)
+        cdf["번호"] = cdf["번호"].astype(int)
+        return cdf[CORRECTION_COLUMNS]
+    except Exception as exc:
+        print(f"[gist] 분류 수정 로드 실패: {exc}")
+        return pd.DataFrame(columns=CORRECTION_COLUMNS)
+
+
+def save_corrections(new_corrections: pd.DataFrame) -> pd.DataFrame:
+    """기존 Gist 저장 수정본 + 새로 고친 항목을 병합해 Gist에 다시 저장."""
+    gist_id, github_token = _get_gist_credentials()
+    if not gist_id or not github_token:
+        raise RuntimeError("Gist 인증 정보(gist_id/github_token)가 설정되어 있지 않습니다.")
+
+    combined = pd.concat([load_corrections(), new_corrections], ignore_index=True)
+    combined = combined.drop_duplicates(subset=["회차", "교시", "번호"], keep="last")
+    combined = combined.sort_values(["회차", "교시", "번호"]).reset_index(drop=True)
+
+    payload = json.dumps({
+        "files": {
+            CORRECTIONS_FILENAME: {
+                "content": json.dumps(combined.to_dict("records"), ensure_ascii=False, indent=2)
+            }
+        }
+    }).encode()
+
+    req = urllib.request.Request(
+        f"https://api.github.com/gists/{gist_id}",
+        data=payload,
+        method="PATCH",
+        headers={
+            "Authorization": f"token {github_token}",
+            "Accept": "application/vnd.github.v3+json",
+            "Content-Type": "application/json",
+            "User-Agent": "construction-safety-exam",
+        },
+    )
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        resp.read()
+
+    _fetch_gist.clear()
+    return combined
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # 데이터 로딩
 # ─────────────────────────────────────────────────────────────────────────────
 @st.cache_data(ttl=300)  # 5분 캐시 — Gist에 새 문제 추가 후 최대 5분 내 반영(저장 시 즉시 clear도 호출)
@@ -270,6 +333,13 @@ def load_data():
     if not pending.empty:
         df = pd.concat([df, pending], ignore_index=True)
         df = df.drop_duplicates(subset=["회차", "교시", "번호"], keep="first")
+
+    corrections = load_corrections()
+    if not corrections.empty:
+        df = df.set_index(["회차", "교시", "번호"])
+        corrections = corrections.set_index(["회차", "교시", "번호"])
+        df.update(corrections[["cat1", "cat2"]])
+        df = df.reset_index()
 
     df["분야"] = df["cat1"].map(lambda x: CAT1_DISPLAY.get(str(x).strip(), str(x).strip()))
     df["위치"] = df.apply(lambda row: f"{round_to_year(row['회차'])}년 {row['회차']}회 {row['교시']}교시 {row['번호']}번", axis=1)
@@ -517,13 +587,58 @@ def main():
 
         st.markdown(f"**{sel_round2}회 — {len(filtered)}문제**")
 
-        show_df = filtered[["위치", "분야", "cat2", "문제"]].rename(
-            columns={"위치": "출제위치", "cat2": "세부주제"})
-        st.dataframe(show_df, use_container_width=True, hide_index=True,
-                     column_config={
-                         "문제": st.column_config.TextColumn("문제", width="large"),
-                         "세부주제": st.column_config.TextColumn("세부주제", width="medium"),
-                     })
+        if is_admin:
+            st.caption("표에서 분야·세부주제를 바로 수정할 수 있습니다. 고친 뒤 아래 저장 버튼을 누르세요.")
+            edit_cols = ["회차", "교시", "번호", "위치", "분야", "cat2", "문제"]
+            edit_df = filtered[edit_cols].rename(columns={"cat2": "세부주제"}).reset_index(drop=True)
+            field_options = sorted(set(CAT1_DISPLAY.values()))
+
+            edited = st.data_editor(
+                edit_df,
+                column_config={
+                    "회차": None,
+                    "교시": None,
+                    "번호": None,
+                    "위치": st.column_config.TextColumn("출제위치", disabled=True),
+                    "분야": st.column_config.SelectboxColumn("분야", options=field_options, width="medium"),
+                    "세부주제": st.column_config.TextColumn("세부주제", width="medium"),
+                    "문제": st.column_config.TextColumn("문제", width="large", disabled=True),
+                },
+                hide_index=True,
+                use_container_width=True,
+                num_rows="fixed",
+                key=f"tab2_editor_{sel_round2}_{sel_period2}",
+            )
+
+            display_to_code = {v: k for k, v in reversed(list(CAT1_DISPLAY.items()))}
+            changed = []
+            for i in range(len(edit_df)):
+                orig, new = edit_df.iloc[i], edited.iloc[i]
+                if orig["분야"] != new["분야"] or orig["세부주제"] != new["세부주제"]:
+                    changed.append({
+                        "회차": int(new["회차"]), "교시": int(new["교시"]), "번호": int(new["번호"]),
+                        "cat1": display_to_code.get(new["분야"], new["분야"]),
+                        "cat2": str(new["세부주제"] or ""),
+                    })
+
+            if changed:
+                st.info(f"{len(changed)}개 문제가 수정되었습니다.")
+                if st.button("💾 분류 수정 저장", type="primary", key="btn_save_corrections"):
+                    try:
+                        save_corrections(pd.DataFrame(changed))
+                        load_data.clear()
+                        st.success("저장 완료! 반영되었습니다.")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"저장 실패: {e}")
+        else:
+            show_df = filtered[["위치", "분야", "cat2", "문제"]].rename(
+                columns={"위치": "출제위치", "cat2": "세부주제"})
+            st.dataframe(show_df, use_container_width=True, hide_index=True,
+                         column_config={
+                             "문제": st.column_config.TextColumn("문제", width="large"),
+                             "세부주제": st.column_config.TextColumn("세부주제", width="medium"),
+                         })
 
     # ──────────────────────────────────────────────────────────────────────────
     # TAB 3: 대쉬보드
