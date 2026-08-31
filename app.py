@@ -14,14 +14,21 @@ import re
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 import plotly.express as px
-import plotly.graph_objects as go
-from plotly.subplots import make_subplots
+
+from pdf_import import CAT1_OPTIONS, auto_assign_cat1, parse_exam_pdf
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 설정
 # ─────────────────────────────────────────────────────────────────────────────
-EXCEL_PATH = "기출문제(106~138회까지).xlsx"
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+EXCEL_PATH = os.path.join(BASE_DIR, "기출문제(106~138회까지).xlsx")
+CONFIG_PATH = os.path.join(BASE_DIR, "config.yaml")
 SIMILARITY_THRESHOLD = 0.30   # 유사 문제 표시 기준
+
+# 새로 업로드된 문제는 GitHub Gist(비공개, 인증 설정과 동일한 gist)의 이 파일에
+# JSON으로 저장된다. 클라우드 서버 재시작/재배포와 무관하게 영구 반영됨.
+PENDING_QUESTIONS_FILENAME = "new_questions.json"
+ADMIN_USERNAMES = {"admin", "guess902", "kinggalma"}
 
 
 def round_to_year(r: int) -> int:
@@ -95,8 +102,8 @@ def get_auth_config():
         try:
             gist_id = st.secrets.get("gist_id")
             github_token = st.secrets.get("github_token")
-        except Exception:
-            pass
+        except Exception as exc:
+            print(f"[auth] Streamlit secrets 조회 실패: {exc}")
         if not gist_id:
             gist_id = os.environ.get("GIST_ID")
             github_token = os.environ.get("GITHUB_TOKEN")
@@ -114,8 +121,8 @@ def get_auth_config():
                 data = json.loads(resp.read())
                 content = data["files"]["config.yaml"]["content"]
                 return yaml.safe_load(content)
-    except Exception:
-        pass
+    except Exception as exc:
+        print(f"[auth] GitHub Gist 인증 설정 로드 실패: {exc}")
 
     # 2) Streamlit Cloud 직접 secrets (credentials 항목이 있는 경우)
     try:
@@ -135,21 +142,120 @@ def get_auth_config():
                     "expiry_days": int(st.secrets["cookie"]["expiry_days"]),
                 },
             }
-    except Exception:
-        pass
+    except Exception as exc:
+        print(f"[auth] Streamlit secrets 인증 설정 로드 실패: {exc}")
+
+    env_config = os.environ.get("AUTH_CONFIG_YAML")
+    if env_config:
+        try:
+            return yaml.safe_load(env_config.replace("\\n", "\n"))
+        except yaml.YAMLError as exc:
+            print(f"[auth] AUTH_CONFIG_YAML 파싱 실패: {exc}")
 
     # 3) 로컬 개발: config.yaml 파일
-    if os.path.exists("config.yaml"):
-        with open("config.yaml", encoding="utf-8-sig") as f:
+    if os.path.exists(CONFIG_PATH):
+        with open(CONFIG_PATH, encoding="utf-8-sig") as f:
             return yaml.load(f, Loader=SafeLoader)
 
     return None
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Gist 기반 신규 문제 저장 (관리자가 클라우드 앱에서 업로드한 PDF 결과 영구 저장)
+# ─────────────────────────────────────────────────────────────────────────────
+PENDING_COLUMNS = ["회차", "교시", "번호", "cat1", "cat2", "문제"]
+
+
+def _get_gist_credentials():
+    gist_id = github_token = None
+    try:
+        gist_id = st.secrets.get("gist_id")
+        github_token = st.secrets.get("github_token")
+    except Exception as exc:
+        print(f"[gist] secrets 조회 실패: {exc}")
+    if not gist_id:
+        gist_id = os.environ.get("GIST_ID")
+        github_token = os.environ.get("GITHUB_TOKEN")
+    return gist_id, github_token
+
+
+@st.cache_data(ttl=60)
+def _fetch_gist():
+    gist_id, github_token = _get_gist_credentials()
+    if not gist_id or not github_token:
+        return None
+    req = urllib.request.Request(
+        f"https://api.github.com/gists/{gist_id}",
+        headers={
+            "Authorization": f"token {github_token}",
+            "Accept": "application/vnd.github.v3+json",
+            "User-Agent": "construction-safety-exam",
+        },
+    )
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        return json.loads(resp.read())
+
+
+def load_pending_questions() -> pd.DataFrame:
+    """관리자가 클라우드 앱에서 업로드해 Gist에 저장해둔 신규 문제 목록."""
+    try:
+        gist = _fetch_gist()
+        file_info = (gist or {}).get("files", {}).get(PENDING_QUESTIONS_FILENAME)
+        if not file_info or not file_info.get("content"):
+            return pd.DataFrame(columns=PENDING_COLUMNS)
+        records = json.loads(file_info["content"])
+        if not records:
+            return pd.DataFrame(columns=PENDING_COLUMNS)
+        df = pd.DataFrame(records)
+        df["회차"] = df["회차"].astype(int)
+        df["교시"] = df["교시"].astype(int)
+        df["번호"] = df["번호"].astype(int)
+        return df[PENDING_COLUMNS]
+    except Exception as exc:
+        print(f"[gist] 신규 문제 로드 실패: {exc}")
+        return pd.DataFrame(columns=PENDING_COLUMNS)
+
+
+def save_pending_questions(new_df: pd.DataFrame) -> pd.DataFrame:
+    """기존 Gist 저장 문제 + 새로 업로드된 문제를 병합해 Gist에 다시 저장."""
+    gist_id, github_token = _get_gist_credentials()
+    if not gist_id or not github_token:
+        raise RuntimeError("Gist 인증 정보(gist_id/github_token)가 설정되어 있지 않습니다.")
+
+    combined = pd.concat([load_pending_questions(), new_df], ignore_index=True)
+    combined = combined.drop_duplicates(subset=["회차", "교시", "번호"], keep="last")
+    combined = combined.sort_values(["회차", "교시", "번호"]).reset_index(drop=True)
+
+    payload = json.dumps({
+        "files": {
+            PENDING_QUESTIONS_FILENAME: {
+                "content": json.dumps(combined.to_dict("records"), ensure_ascii=False, indent=2)
+            }
+        }
+    }).encode()
+
+    req = urllib.request.Request(
+        f"https://api.github.com/gists/{gist_id}",
+        data=payload,
+        method="PATCH",
+        headers={
+            "Authorization": f"token {github_token}",
+            "Accept": "application/vnd.github.v3+json",
+            "Content-Type": "application/json",
+            "User-Agent": "construction-safety-exam",
+        },
+    )
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        resp.read()
+
+    _fetch_gist.clear()
+    return combined
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # 데이터 로딩
 # ─────────────────────────────────────────────────────────────────────────────
-@st.cache_data
+@st.cache_data(ttl=300)  # 5분 캐시 — Gist에 새 문제 추가 후 최대 5분 내 반영(저장 시 즉시 clear도 호출)
 def load_data():
     df = pd.read_excel(EXCEL_PATH, sheet_name="과년도모음", header=0)
     df.columns = ["구분", "회차", "교시", "번호", "cat1", "cat2", "문제"] + list(df.columns[7:])
@@ -159,9 +265,15 @@ def load_data():
     df["번호"] = df["번호"].astype(int)
     df["문제"] = df["문제"].astype(str).str.strip()
     df["cat2"] = df["cat2"].fillna("").astype(str).str.strip()
+
+    pending = load_pending_questions()
+    if not pending.empty:
+        df = pd.concat([df, pending], ignore_index=True)
+        df = df.drop_duplicates(subset=["회차", "교시", "번호"], keep="first")
+
     df["분야"] = df["cat1"].map(lambda x: CAT1_DISPLAY.get(str(x).strip(), str(x).strip()))
     df["위치"] = df.apply(lambda row: f"{round_to_year(row['회차'])}년 {row['회차']}회 {row['교시']}교시 {row['번호']}번", axis=1)
-    df = df.reset_index(drop=True)
+    df = df.sort_values(["회차", "교시", "번호"]).reset_index(drop=True)
     return df
 
 
@@ -304,7 +416,13 @@ def main():
     st.title("🏗️ 건설안전기술사 기출문제 분석 프로그램")
     st.caption(f"{min_round}회 ~ {max_round}회 기출문제 | 유사도 기준: {SIMILARITY_THRESHOLD * 100:.0f}%")
 
-    tab1, tab2, tab3 = st.tabs(["🔍 문제 검색 & 유사 문제", "📋 회차별 문제 목록", "📊 대쉬보드"])
+    is_admin = st.session_state.get("username") in ADMIN_USERNAMES
+    tab_labels = ["🔍 문제 검색 & 유사 문제", "📋 회차별 문제 목록", "📊 대쉬보드"]
+    if is_admin:
+        tab_labels.append("🛠️ 새 회차 추가")
+    tabs = st.tabs(tab_labels)
+    tab1, tab2, tab3 = tabs[0], tabs[1], tabs[2]
+    tab4 = tabs[3] if is_admin else None
 
     # ──────────────────────────────────────────────────────────────────────────
     # TAB 1: 검색 & 유사 문제
@@ -495,6 +613,68 @@ def main():
                 use_container_width=True,
                 hide_index=True,
             )
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # TAB 4: 새 회차 추가 (관리자 전용) — 문제지 PDF만 올리면 즉시 반영
+    # ──────────────────────────────────────────────────────────────────────────
+    if is_admin:
+        with tab4:
+            st.subheader("새 회차 문제지 PDF 추가")
+            st.caption(
+                "국가기술자격 시험문제 표준 양식(1페이지=1교시) PDF를 올리면 "
+                "회차·교시·번호·문제가 자동 인식됩니다. 저장하면 비공개 Gist에 저장되어 "
+                "재배포 없이 모든 사용자에게 즉시 반영됩니다."
+            )
+
+            pending_df = load_pending_questions()
+            if not pending_df.empty:
+                st.caption(f"현재 Gist에 저장된 신규 문제: {len(pending_df)}개 (회차: {sorted(pending_df['회차'].unique().tolist())})")
+
+            uploaded_pdf = st.file_uploader("문제지 PDF 업로드", type=["pdf"], key="admin_pdf_uploader")
+
+            if uploaded_pdf:
+                try:
+                    preview_df = parse_exam_pdf(uploaded_pdf)
+                    st.success(f"✅ {preview_df['회차'].iloc[0]}회 — {len(preview_df)}개 문제 인식됨")
+
+                    edited_df = st.data_editor(
+                        preview_df,
+                        column_config={
+                            "회차": st.column_config.NumberColumn("회차", width="small", disabled=True),
+                            "교시": st.column_config.NumberColumn("교시", width="small", disabled=True),
+                            "번호": st.column_config.NumberColumn("번호", width="small", disabled=True),
+                            "cat1": st.column_config.SelectboxColumn("분야(cat1)", options=CAT1_OPTIONS, width="medium"),
+                            "cat2": st.column_config.TextColumn("소분류(cat2)", width="medium"),
+                            "문제": st.column_config.TextColumn("문제 내용", width="large"),
+                        },
+                        hide_index=True,
+                        use_container_width=True,
+                        num_rows="fixed",
+                        key="admin_pdf_editor",
+                    )
+
+                    existing_keys = set(zip(df["회차"], df["교시"], df["번호"]))
+                    dup_mask = edited_df.apply(
+                        lambda r: (int(r["회차"]), int(r["교시"]), int(r["번호"])) in existing_keys,
+                        axis=1,
+                    )
+                    to_add = edited_df[~dup_mask]
+                    if dup_mask.any():
+                        st.warning(f"⚠️ 이미 존재하는 문제 {dup_mask.sum()}개는 제외됩니다.")
+
+                    st.markdown(f"**최종 추가될 문제: {len(to_add)}개**")
+
+                    if st.button("💾 저장 (즉시 반영)", type="primary", disabled=len(to_add) == 0):
+                        try:
+                            save_pending_questions(to_add)
+                            load_data.clear()
+                            build_tfidf.clear()
+                            st.success(f"🎉 {len(to_add)}개 문제가 저장되어 즉시 반영되었습니다!")
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"저장 실패: {e}")
+                except Exception as e:
+                    st.error(f"PDF 파싱 실패: {e}")
 
 
 if __name__ == "__main__":
